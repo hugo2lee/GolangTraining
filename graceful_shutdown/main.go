@@ -15,7 +15,7 @@ func main() {
 		_, _ = writer.Write([]byte("hello"))
 	}))
 	s2 := service.NewServer("admin", "localhost:8081")
-	app := service.NewApp([]*service.Server{s1, s2}, service.WithShutdownCallbacks(StoreCacheToDBCallback))
+	app := service.NewApp([]*service.Server{s1, s2}, service.WithShutdownCallbacks(StoreCacheToDBCallback), service.WithShutdownCallbacks(CloseCacheCallback, CloseDbCallback))
 	app.StartAndServe()
 }
 
@@ -25,12 +25,43 @@ func StoreCacheToDBCallback(ctx context.Context) {
 		// 你的业务逻辑，比如说这里我们模拟的是将本地缓存刷新到数据库里面
 		// 这里我们简单的睡一段时间来模拟
 		log.Printf("刷新缓存中……")
-		time.Sleep(1 * time.Second)
+		time.Sleep(5 * time.Second)
+		done <- struct{}{}
 	}()
 	select {
 	case <-ctx.Done():
 		log.Printf("刷新缓存超时")
 	case <-done:
 		log.Printf("缓存被刷新到了 DB")
+	}
+}
+
+func CloseCacheCallback(ctx context.Context) {
+	done := make(chan struct{}, 1)
+	go func() {
+		log.Printf("关闭缓存中……")
+		time.Sleep(10 * time.Second)
+		done <- struct{}{}
+	}()
+	select {
+	case <-ctx.Done():
+		log.Printf("关闭缓存超时")
+	case <-done:
+		log.Printf("关闭缓存成功")
+	}
+}
+
+func CloseDbCallback(ctx context.Context) {
+	done := make(chan struct{}, 1)
+	go func() {
+		log.Printf("关闭Db中……")
+		time.Sleep(15 * time.Second)
+		done <- struct{}{}
+	}()
+	select {
+	case <-ctx.Done():
+		log.Printf("关闭Db超时")
+	case <-done:
+		log.Printf("关闭Db成功")
 	}
 }

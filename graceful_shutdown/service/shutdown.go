@@ -4,6 +4,10 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -17,7 +21,10 @@ type ShutdownCallback func(ctx context.Context)
 
 // 你需要实现这个方法
 func WithShutdownCallbacks(cbs ...ShutdownCallback) Option {
-	panic("implement me")
+	// panic("implement me")
+	return func(a *App) {
+		a.cbs = append(a.cbs, cbs...)
+	}
 }
 
 // 这里我已经预先定义好了各种可配置字段
@@ -37,7 +44,18 @@ type App struct {
 
 // NewApp 创建 App 实例，注意设置默认值，同时使用这些选项
 func NewApp(servers []*Server, opts ...Option) *App {
-	panic("implement me")
+	// panic("implement me")
+	a := &App{
+		servers:         servers,
+		shutdownTimeout: 30 * time.Second,
+		waitTime:        5 * time.Second,
+		cbTimeout:       12 * time.Second,
+	}
+
+	for _, opFunc := range opts {
+		opFunc(a)
+	}
+	return a
 }
 
 // StartAndServe 你主要要实现这个方法
@@ -51,28 +69,69 @@ func (app *App) StartAndServe() {
 				} else {
 					log.Printf("服务器%s异常退出", srv.name)
 				}
-
 			}
 		}()
 	}
 	// 从这里开始优雅退出监听系统信号，强制退出以及超时强制退出。
 	// 优雅退出的具体步骤在 shutdown 里面实现
 	// 所以你需要在这里恰当的位置，调用 shutdown
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, os.Kill, syscall.SIGKILL, syscall.SIGTERM)
+	select {
+	case <-c:
+		// 监听到了关闭信号
+		go func() {
+			select {
+			case <-c:
+				log.Println("二次强制退出")
+				os.Exit(1) // 再次监听到了关闭信号，强制退出
+			case <-time.After(app.shutdownTimeout):
+				log.Println("超时强制退出")
+				os.Exit(1) // 超时强制退出
+			}
+		}()
+		app.shutdown() // 优雅退出
+	}
 }
 
 // shutdown 你要设计这里面的执行步骤。
 func (app *App) shutdown() {
 	log.Println("开始关闭应用，停止接收新请求")
 	// 你需要在这里让所有的 server 拒绝新请求
+	for _, s := range app.servers {
+		s.rejectReq()
+	}
 
 	log.Println("等待正在执行请求完结")
 	// 在这里等待一段时间
+	// 等待所有的请求处理完毕
+	time.Sleep(app.waitTime)
+	// ctx, _ := context.WithTimeout(context.Background(), app.waitTime)
 
 	log.Println("开始关闭服务器")
 	// 并发关闭服务器，同时要注意协调所有的 server 都关闭之后才能步入下一个阶段
+	wg := sync.WaitGroup{}
+	for _, s := range app.servers {
+		wg.Add(1)
+		go func(s *Server) {
+			defer wg.Done()
+			s.stop()
+		}(s)
+	}
+	wg.Wait()
 
 	log.Println("开始执行自定义回调")
 	// 并发执行回调，要注意协调所有的回调都执行完才会步入下一个阶段
+	ctx, _ := context.WithTimeout(context.Background(), app.cbTimeout)
+	wg = sync.WaitGroup{}
+	for _, cb := range app.cbs {
+		wg.Add(1)
+		go func(cb ShutdownCallback) {
+			defer wg.Done()
+			cb(ctx)
+		}(cb)
+	}
+	wg.Wait()
 
 	// 释放资源
 	log.Println("开始释放资源")
@@ -123,11 +182,13 @@ func (s *Server) Handle(pattern string, handler http.Handler) {
 }
 
 func (s *Server) Start() error {
+	log.Printf("服务器%s启动中...", s.name)
 	return s.srv.ListenAndServe()
 }
 
 func (s *Server) rejectReq() {
 	s.mux.reject = true
+	log.Printf("服务器%s拒绝新请求", s.name)
 }
 
 func (s *Server) stop() error {
